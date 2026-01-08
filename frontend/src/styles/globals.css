@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  color-scheme: light;
+  --bg: 0 0% 100%;
+  --bg-soft: 210 40% 98%;
+  --fg: 222 47% 11%;
+  --fg-muted: 215 16% 40%;
+  --card: 0 0% 100%;
+  --card-border: 220 14% 88%;
+  --accent: 262 83% 50%;
+  --good: 142 71% 35%;
+  --warn: 38 92% 45%;
+  --bad: 0 84% 55%;
+  --grid: 2 6 23;
+  --grid-alpha: 0.06;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-fg antialiased;
+}
+
+/* subtle background grid */
+.bg-grid {
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(var(--grid), var(--grid-alpha)) 1px, transparent 0);
+  background-size: 32px 32px;
+}
+
+
