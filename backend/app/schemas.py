@@ -38,6 +38,7 @@ class ChatAnswer(BaseModel):
     text: str
     table: dict[str, Any] | None = None
     chart: dict[str, Any] | None = None
+    citations: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):

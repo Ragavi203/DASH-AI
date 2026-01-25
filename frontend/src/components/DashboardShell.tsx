@@ -36,24 +36,29 @@ export function DashboardShell({
   const anomalies = Array.isArray(analysis?.anomalies) ? analysis.anomalies : [];
   const charts = Array.isArray(analysis?.charts) ? analysis.charts : [];
   const preview = Array.isArray(analysis?.preview) ? analysis.preview : [];
+  const overview = analysis?.overview ?? null;
 
   const chartSections = useMemo(() => {
-    const trends = charts.filter((c: any) => c?.type === "line");
-    const breakdowns = charts.filter((c: any) => c?.type === "bar");
-    const dists = charts.filter((c: any) => c?.type === "hist");
-    const rels = charts.filter((c: any) => c?.type === "scatter");
-    const tables = charts.filter((c: any) => c?.type === "table");
-    const other = charts.filter(
-      (c: any) => !["line", "bar", "hist", "scatter", "table"].includes(String(c?.type))
-    );
-    return [
-      { key: "trends", title: "Trends", desc: "How metrics evolve over time.", charts: trends },
-      { key: "breakdowns", title: "Breakdowns", desc: "What drives totals across categories.", charts: breakdowns },
-      { key: "dists", title: "Distributions", desc: "How values are spread.", charts: dists },
-      { key: "rels", title: "Relationships", desc: "How two metrics move together.", charts: rels },
-      { key: "tables", title: "Tables", desc: "Raw previews and summaries.", charts: tables },
-      { key: "other", title: "Other", desc: "", charts: other },
-    ].filter((s) => s.charts.length);
+    const bySection: Record<string, any[]> = {};
+    for (const c of charts) {
+      const sec = String(c?.section ?? "");
+      const key = sec || (c?.type === "line" ? "Trends" : c?.type === "bar" ? "Breakdowns" : c?.type === "hist" ? "Distributions" : c?.type === "scatter" ? "Relationships" : c?.type === "table" ? "Tables" : "Other");
+      bySection[key] = bySection[key] || [];
+      bySection[key].push(c);
+    }
+    const order = ["Recommended", "Trends", "Breakdowns", "Distributions", "Relationships", "Tables", "Other"];
+    const desc: Record<string, string> = {
+      Recommended: "The most useful views for this dataset.",
+      Trends: "How metrics evolve over time.",
+      Breakdowns: "What drives totals across categories.",
+      Distributions: "How values are spread.",
+      Relationships: "How two metrics move together.",
+      Tables: "Raw previews and summaries.",
+      Other: "",
+    };
+    return order
+      .filter((k) => (bySection[k] || []).length)
+      .map((k) => ({ key: k.toLowerCase(), title: k, desc: desc[k] ?? "", charts: bySection[k] }));
   }, [charts]);
 
   const correlations = Array.isArray(analysis?.profile?.strong_correlations)
@@ -114,10 +119,17 @@ export function DashboardShell({
 
       {tab === "overview" ? (
         <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 lg:grid-cols-1">
-            <Stat label="Rows" value={rows != null ? formatNumber(rows) : "—"} />
-            <Stat label="Columns" value={cols != null ? formatNumber(cols) : "—"} />
-            <Stat label="Charts" value={formatNumber(charts.length)} />
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-1">
+            {(overview?.kpis ? overview.kpis : []).slice(0, 6).map((k: any, idx: number) => (
+              <Stat key={idx} label={String(k.label)} value={typeof k.value === "number" ? formatNumber(k.value) : String(k.value)} />
+            ))}
+            {!overview?.kpis ? (
+              <>
+                <Stat label="Rows" value={rows != null ? formatNumber(rows) : "—"} />
+                <Stat label="Columns" value={cols != null ? formatNumber(cols) : "—"} />
+                <Stat label="Charts" value={formatNumber(charts.length)} />
+              </>
+            ) : null}
           </div>
 
           <Card className="lg:col-span-2 p-5">
@@ -126,6 +138,16 @@ export function DashboardShell({
               <Badge>auto-written</Badge>
             </div>
             <div className="mt-4 space-y-3">
+              {overview?.highlights?.length ? (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {overview.highlights.slice(0, 4).map((h: any, idx: number) => (
+                    <div key={idx} className="rounded-xl border border-card-border bg-bg-soft/40 p-3">
+                      <div className="text-xs text-fg-muted">{String(h.type ?? "highlight").toUpperCase()}</div>
+                      <div className="mt-1 text-sm text-fg/90">{String(h.text ?? "")}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               {insights.length ? (
                 insights.map((i: any, idx: number) => (
                   <div key={idx} className="rounded-xl border border-card-border bg-bg-soft/40 p-3">
@@ -138,6 +160,23 @@ export function DashboardShell({
               )}
             </div>
           </Card>
+
+          {overview?.suggested_questions?.length ? (
+            <Card className="lg:col-span-3 p-5">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-fg">Suggested questions</div>
+                <Badge>chat</Badge>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {overview.suggested_questions.slice(0, 8).map((q: string, idx: number) => (
+                  <span key={idx} className="rounded-full border border-card-border bg-bg-soft/60 px-3 py-2 text-sm text-fg/90">
+                    {q}
+                  </span>
+                ))}
+              </div>
+              <div className="mt-3 text-xs text-fg-muted">Copy/paste any of these into the Chat tab.</div>
+            </Card>
+          ) : null}
 
           <Card className="lg:col-span-3 p-5">
             <div className="flex items-center justify-between">
@@ -281,7 +320,7 @@ function ChatPanel({ datasetId }: { datasetId: string }) {
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<
-    Array<{ role: "user" | "ai"; text: string; table?: any; chart?: any; kind?: string }>
+    Array<{ role: "user" | "ai"; text: string; table?: any; chart?: any; kind?: string; citations?: any }>
   >([
     {
       role: "ai",
@@ -303,6 +342,7 @@ function ChatPanel({ datasetId }: { datasetId: string }) {
           kind: String(m.type ?? "text"),
           table: m.table,
           chart: m.chart,
+          citations: m.citations,
         }));
         setMessages(mapped);
       } catch {
@@ -332,6 +372,7 @@ function ChatPanel({ datasetId }: { datasetId: string }) {
           kind: String(answer?.type ?? "text"),
           table: answer?.table,
           chart: answer?.chart,
+          citations: answer?.citations,
         },
       ]);
     } catch (e: any) {
@@ -362,10 +403,23 @@ function ChatPanel({ datasetId }: { datasetId: string }) {
             >
               <div className="text-[11px] uppercase tracking-wide text-fg-muted">{m.role === "user" ? "You" : "AI"}</div>
               <div className="mt-1 whitespace-pre-wrap">{m.text}</div>
+              {m.role === "ai" && m.kind === "chart" && m.chart ? (
+                <div className="mt-3">
+                  <ChartCard chart={m.chart} />
+                </div>
+              ) : null}
               {m.role === "ai" && m.kind === "table" && m.table ? (
                 <div className="mt-3">
                   <InlineTable table={m.table} />
                 </div>
+              ) : null}
+              {m.role === "ai" && m.citations ? (
+                <details className="mt-3 rounded-xl border border-card-border bg-bg/60 px-3 py-2">
+                  <summary className="cursor-pointer text-xs font-medium text-fg-muted">How it was computed</summary>
+                  <pre className="mt-2 text-[11px] text-fg-muted whitespace-pre-wrap">
+                    {JSON.stringify(m.citations, null, 2)}
+                  </pre>
+                </details>
               ) : null}
             </div>
           ))}

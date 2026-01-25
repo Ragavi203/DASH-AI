@@ -215,6 +215,7 @@ def chat_history(dataset_id: str, db: Session = Depends(get_db)):
                 "text": str(payload.get("text") or payload.get("message") or ""),
                 "table": payload.get("table"),
                 "chart": payload.get("chart"),
+                "citations": payload.get("citations"),
                 "created_at": m.created_at.isoformat(),
             }
         )

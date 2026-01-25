@@ -9,12 +9,18 @@ import pandas as pd
 from app.services.anomalies import detect_anomalies
 from app.services.openai_chat import openai_answer
 from app.services.profiling import infer_column_types
+from app.services.query_engine import try_compute_answer
 
 
 def answer_question(df: pd.DataFrame, question: str, analysis: dict[str, Any] | None = None) -> dict[str, Any]:
     q = question.strip()
     ql = q.lower()
     types = infer_column_types(df)
+
+    # Prefer deterministic computed answers with citations
+    computed = try_compute_answer(df, q, types, analysis)
+    if computed and isinstance(computed.answer, dict):
+        return computed.answer
 
     # If OpenAI is configured, prefer LLM-backed answers (with fallback)
     try:

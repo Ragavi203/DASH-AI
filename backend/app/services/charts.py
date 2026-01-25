@@ -31,7 +31,11 @@ def suggest_charts(
 
     grain = _infer_time_grain(best_dt, col_profile) if best_dt else None
 
-    # Always useful: row count over time
+    # Helper for prettier labels
+    def pretty(s: str) -> str:
+        return str(s).replace("_", " ").strip()
+
+    # Recommended: row count over time (if time exists)
     if best_dt:
         x = best_dt
         suggestions.append(
@@ -43,10 +47,12 @@ def suggest_charts(
                 "agg": "count",
                 "time_grain": grain,
                 "title": "Rows over time",
+                "section": "Recommended",
+                "reason": f"Shows activity over time using {pretty(x)}.",
             }
         )
 
-    # Time series metrics (smart agg)
+    # Recommended: primary metric over time (if time+metric exist)
     if best_dt and primary_metric:
         x = best_dt
         for y in [primary_metric, *secondary_metrics]:
@@ -59,11 +65,13 @@ def suggest_charts(
                     "y": y,
                     "agg": agg,
                     "time_grain": grain,
-                    "title": f"{y} over time ({agg})",
+                    "title": f"{pretty(y)} over time ({agg})",
+                    "section": "Trends",
+                    "reason": f"{agg.upper()}({pretty(y)}) grouped by {pretty(x)} ({grain}).",
                 }
             )
 
-    # Categorical distributions (only for real dimensions, not IDs)
+    # Breakdowns: counts by key dimensions
     for c in cat_candidates[:3]:
         suggestions.append(
             {
@@ -73,11 +81,13 @@ def suggest_charts(
                 "y": "__count__",
                 "agg": "count",
                 "limit": 12,
-                "title": f"Count by {c}",
+                "title": f"Count by {pretty(c)}",
+                "section": "Breakdowns",
+                "reason": f"Most common {pretty(c)} values (top 12).",
             }
         )
 
-    # Metric breakdowns by dimension(s)
+    # Breakdowns: metric by key dimensions
     if primary_metric and cat_candidates:
         for c in cat_candidates[:2]:
             agg = _metric_agg_for(primary_metric, col_profile)
@@ -89,11 +99,29 @@ def suggest_charts(
                     "y": primary_metric,
                     "agg": agg,
                     "limit": 12,
-                    "title": f"{agg.title()} {primary_metric} by {c}",
+                    "title": f"{agg.title()} {pretty(primary_metric)} by {pretty(c)}",
+                    "section": "Breakdowns",
+                    "reason": f"{agg.upper()}({pretty(primary_metric)}) grouped by {pretty(c)} (top 12).",
                 }
             )
 
-    # Histogram: each numeric col
+    # Tables: top combinations (if 2+ good categoricals)
+    if len(cat_candidates) >= 2:
+        a, b = cat_candidates[0], cat_candidates[1]
+        suggestions.append(
+            {
+                "id": f"table:combo:{a}:{b}",
+                "type": "table_combo",
+                "a": a,
+                "b": b,
+                "limit": 20,
+                "title": f"Top combinations: {pretty(a)} × {pretty(b)}",
+                "section": "Recommended",
+                "reason": "Quickly reveals the most frequent category pairs.",
+            }
+        )
+
+    # Distributions: key numeric columns
     for y in metrics[:3]:
         suggestions.append(
             {
@@ -101,11 +129,13 @@ def suggest_charts(
                 "type": "hist",
                 "x": y,
                 "bins": 20,
-                "title": f"Distribution of {y}",
+                "title": f"Distribution of {pretty(y)}",
+                "section": "Distributions",
+                "reason": f"Shows spread and outliers in {pretty(y)}.",
             }
         )
 
-    # Scatter: strongest correlations (up to 2), else best two numeric
+    # Relationships: strongest correlations (up to 2)
     pairs = _pick_scatter_pairs(num_cols, profile, limit=2)
     for a, b in pairs:
         suggestions.append(
@@ -114,11 +144,13 @@ def suggest_charts(
                 "type": "scatter",
                 "x": a,
                 "y": b,
-                "title": f"{b} vs {a}",
+                "title": f"{pretty(b)} vs {pretty(a)}",
+                "section": "Relationships",
+                "reason": "Strongest correlation detected in numeric columns.",
             }
         )
 
-    # If no datetime, add a "Top categories" metric bar to avoid a generic feel
+    # If no datetime: still recommend a strong breakdown
     if not best_dt and primary_metric and cat_candidates:
         c = cat_candidates[0]
         agg = _metric_agg_for(primary_metric, col_profile)
@@ -130,7 +162,9 @@ def suggest_charts(
                 "y": primary_metric,
                 "agg": agg,
                 "limit": 12,
-                "title": f"Top {c} by {agg} {primary_metric}",
+                "title": f"Top {pretty(c)} by {agg} {pretty(primary_metric)}",
+                "section": "Recommended",
+                "reason": "Best single view when there is no time column.",
             }
         )
 
@@ -157,6 +191,8 @@ def materialize_chart(df: pd.DataFrame, spec: dict[str, Any], max_points: int = 
     This is intentionally simple JSON (Recharts-friendly).
     """
     ctype = spec.get("type")
+    section = spec.get("section")
+    reason = spec.get("reason")
     if ctype == "line":
         x, y = spec["x"], spec["y"]
         agg = spec.get("agg", "sum")
@@ -174,7 +210,17 @@ def materialize_chart(df: pd.DataFrame, spec: dict[str, Any], max_points: int = 
         if len(d) > max_points:
             d = d.iloc[:: max(1, len(d) // max_points)]
         data = [{"x": _safe(vx), "y": float(vy)} for vx, vy in zip(d[x], d[y], strict=False)]
-        return {"type": "line", "title": spec.get("title"), "x": x, "y": y, "data": data, "time_grain": grain, "agg": agg}
+        return {
+            "type": "line",
+            "title": spec.get("title"),
+            "x": x,
+            "y": y,
+            "data": data,
+            "time_grain": grain,
+            "agg": agg,
+            "section": section,
+            "reason": reason,
+        }
 
     if ctype == "bar":
         x, y = spec["x"], spec["y"]
@@ -193,18 +239,18 @@ def materialize_chart(df: pd.DataFrame, spec: dict[str, Any], max_points: int = 
                 g = d.groupby(x, dropna=True)[y].sum()
         g = g.sort_values(ascending=False).head(limit)
         data = [{"x": str(ix), "y": float(v)} for ix, v in g.items()]
-        return {"type": "bar", "title": spec.get("title"), "x": x, "y": y, "data": data}
+        return {"type": "bar", "title": spec.get("title"), "x": x, "y": y, "data": data, "section": section, "reason": reason}
 
     if ctype == "hist":
         x = spec["x"]
         bins = int(spec.get("bins", 20))
         s = pd.to_numeric(df[x], errors="coerce").dropna()
         if s.empty:
-            return {"type": "hist", "title": spec.get("title"), "x": x, "bins": bins, "data": []}
+            return {"type": "hist", "title": spec.get("title"), "x": x, "bins": bins, "data": [], "section": section, "reason": reason}
         counts, edges = pd.cut(s, bins=bins, retbins=True, include_lowest=True).value_counts().sort_index(), None
         # derive edges from categories
         data = [{"bin": str(cat), "count": int(cnt)} for cat, cnt in counts.items()]
-        return {"type": "hist", "title": spec.get("title"), "x": x, "bins": bins, "data": data}
+        return {"type": "hist", "title": spec.get("title"), "x": x, "bins": bins, "data": data, "section": section, "reason": reason}
 
     if ctype == "scatter":
         x, y = spec["x"], spec["y"]
@@ -215,10 +261,24 @@ def materialize_chart(df: pd.DataFrame, spec: dict[str, Any], max_points: int = 
         if len(d) > max_points:
             d = d.sample(n=max_points, random_state=7)
         data = [{"x": float(vx), "y": float(vy)} for vx, vy in zip(d[x], d[y], strict=False)]
-        return {"type": "scatter", "title": spec.get("title"), "x": x, "y": y, "data": data}
+        return {"type": "scatter", "title": spec.get("title"), "x": x, "y": y, "data": data, "section": section, "reason": reason}
 
     if ctype == "table":
-        return {"type": "table", "title": spec.get("title"), "data": df.head(50).to_dict(orient="records")}
+        return {"type": "table", "title": spec.get("title"), "data": df.head(50).to_dict(orient="records"), "section": section, "reason": reason}
+
+    if ctype == "table_combo":
+        a, b = spec["a"], spec["b"]
+        limit = int(spec.get("limit", 20))
+        d = df[[a, b]].copy().dropna(subset=[a, b])
+        g = d.groupby([a, b]).size().sort_values(ascending=False).head(limit)
+        rows = [{"a": str(ix[0]), "b": str(ix[1]), "count": int(v)} for ix, v in g.items()]
+        return {
+            "type": "table",
+            "title": spec.get("title"),
+            "data": rows,
+            "section": section,
+            "reason": reason,
+        }
 
     return {"type": "unknown", "title": spec.get("title"), "raw": spec}
 
