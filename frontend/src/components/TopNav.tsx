@@ -1,8 +1,20 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Button } from "./ui";
+import { setToken } from "@/lib/api";
 
 export function TopNav() {
+  const [authed, setAuthed] = useState(false);
+
+  useEffect(() => {
+    try {
+      setAuthed(Boolean(window.localStorage.getItem("dashai_token")));
+    } catch {
+      setAuthed(false);
+    }
+  }, []);
+
   return (
     <div className="sticky top-0 z-40 border-b border-card-border bg-bg/80 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
@@ -20,6 +32,21 @@ export function TopNav() {
           <a className="text-sm text-fg-muted hover:text-fg transition px-2 py-2" href="/history">
             History
           </a>
+          {authed ? (
+            <button
+              className="text-sm text-fg-muted hover:text-fg transition px-2 py-2"
+              onClick={() => {
+                setToken(null);
+                window.location.href = "/";
+              }}
+            >
+              Logout
+            </button>
+          ) : (
+            <a className="text-sm text-fg-muted hover:text-fg transition px-2 py-2" href="/login">
+              Login
+            </a>
+          )}
           <a
             className="hidden sm:inline text-sm text-fg-muted hover:text-fg transition"
             href="https://github.com/"

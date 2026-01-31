@@ -22,6 +22,8 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, futu
 
 
 def init_db() -> None:
+    # Keep create_all for zero-friction local dev.
+    # Production should prefer Alembic migrations (see backend/alembic/).
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)

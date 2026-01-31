@@ -23,6 +23,11 @@ export default function HistoryPage() {
       const res = await listDatasets();
       setItems(res.items ?? []);
     } catch (e: any) {
+      const msg = String(e?.message ?? "");
+      if (msg.includes("(401)") || msg.toLowerCase().includes("missing bearer token")) {
+        window.location.href = `/login?next=${encodeURIComponent("/history")}`;
+        return;
+      }
       setErr(e?.message ?? "Failed to load history.");
     } finally {
       setLoading(false);

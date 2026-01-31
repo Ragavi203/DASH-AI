@@ -10,6 +10,8 @@ from app.services.anomalies import detect_anomalies
 from app.services.openai_chat import openai_answer
 from app.services.profiling import infer_column_types
 from app.services.query_engine import try_compute_answer
+from app.services.retrieval import retrieve_context
+from app.config import get_settings
 
 
 def answer_question(df: pd.DataFrame, question: str, analysis: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -20,17 +22,31 @@ def answer_question(df: pd.DataFrame, question: str, analysis: dict[str, Any] | 
     # Prefer deterministic computed answers with citations
     computed = try_compute_answer(df, q, types, analysis)
     if computed and isinstance(computed.answer, dict):
+        if "citations" not in computed.answer:
+            computed.answer["citations"] = {"computed": True, "source": "computed_engine"}
         return computed.answer
 
     # If OpenAI is configured, prefer LLM-backed answers (with fallback)
     try:
+        settings = get_settings()
         ctx = build_dataset_context(df, types, analysis)
+        retrieval = retrieve_context(q, ctx, top_k=10)
+        ctx["retrieval"] = retrieval
         llm = openai_answer(q, ctx)
         # If model returns an empty text, fall back
         if isinstance(llm, dict) and str(llm.get("text") or "").strip():
+            # augment citations with retrieval details (if present)
+            citations = llm.get("citations") or {}
+            if isinstance(citations, dict):
+                citations["retrieval"] = retrieval.get("score_debug")
+                citations.setdefault("source", "openai")
+                citations.setdefault("budgets", {"timeout_s": settings.openai_timeout_s, "max_tokens": settings.openai_max_tokens})
+                llm["citations"] = citations
             return llm
-    except Exception:
-        pass
+    except Exception as e:
+        openai_err = str(e)
+    else:
+        openai_err = None
 
     # "top N customers by revenue"
     m = re.search(r"top\s+(\d+)\s+(\w[\w\s\-]*)\s+by\s+(\w[\w\s\-]*)", ql)
@@ -48,6 +64,7 @@ def answer_question(df: pd.DataFrame, question: str, analysis: dict[str, Any] | 
                 "type": "table",
                 "text": f"Top {n} {dim} by total {metric}.",
                 "table": {"columns": [dim, metric], "rows": rows},
+                "citations": {"computed": False, "source": "heuristic", "note": "Fallback rule (non-LLM)."},
             }
 
     # "average/mean X", "sum X", "max X", "min X"
@@ -67,26 +84,35 @@ def answer_question(df: pd.DataFrame, question: str, analysis: dict[str, Any] | 
             elif op == "min":
                 val = s.min()
             if val is not None and not pd.isna(val):
-                return {"type": "text", "text": f"{op.title()} of {col}: {float(val):,.4g}"}
+                return {
+                    "type": "text",
+                    "text": f"{op.title()} of {col}: {float(val):,.4g}",
+                    "citations": {"computed": False, "source": "heuristic", "note": "Fallback rule (non-LLM)."},
+                }
 
     # "why did X spike in March" / "spike"
     if "spike" in ql or "anomal" in ql or "outlier" in ql:
         anomalies = detect_anomalies(df, types)
         if not anomalies:
-            return {"type": "text", "text": "I didn’t detect strong anomalies with the default rules. Try asking about a specific column."}
+            return {
+                "type": "text",
+                "text": "No strong anomalies detected with the default rules. Try asking about a specific column.",
+                "citations": {"computed": False, "source": "heuristic"},
+            }
         a0 = anomalies[0]
         if a0.get("type") == "spike":
             return {
                 "type": "text",
                 "text": f"Biggest spike detected in {a0['y_col']} around {a0['x']} (score≈{a0['score']:.2f}). "
                 "Common causes: one-off large transactions, reporting changes, or missing/duplicated rows around that date.",
+                "citations": {"computed": False, "source": "heuristic"},
             }
-        return {"type": "text", "text": f"Outliers detected in {a0.get('col')} beyond IQR bounds."}
+        return {"type": "text", "text": f"Outliers detected in {a0.get('col')} beyond IQR bounds.", "citations": {"computed": False, "source": "heuristic"}}
 
     # "show preview"
     if "preview" in ql or "show rows" in ql:
         rows = df.head(25).fillna("").to_dict(orient="records")
-        return {"type": "table", "text": "Here are the first 25 rows.", "table": {"rows": rows}}
+        return {"type": "table", "text": "Here are the first 25 rows.", "table": {"rows": rows}, "citations": {"computed": False, "source": "heuristic"}}
 
     # fallback
     cols = ", ".join(map(str, df.columns[:25]))
@@ -97,6 +123,11 @@ def answer_question(df: pd.DataFrame, question: str, analysis: dict[str, Any] | 
         "- 'average order_value'\n"
         "- 'what caused the spike in March?'\n\n"
         f"Try referencing column names. I see: {cols}",
+        "citations": {
+            "computed": False,
+            "source": "heuristic",
+            "openai_error": openai_err,
+        },
     }
 
 
@@ -108,15 +139,16 @@ def build_dataset_context(df: pd.DataFrame, types: dict[str, str], analysis: dic
     - correlations + anomalies (from stored analysis if present)
     - small sample rows
     """
+    settings = get_settings()
     shape = {"rows": int(df.shape[0]), "cols": int(df.shape[1])}
-    cols = [str(c) for c in df.columns.tolist()]
+    cols = [str(c) for c in df.columns.tolist()][: int(settings.llm_max_columns)]
 
     profile = (analysis or {}).get("profile") if isinstance(analysis, dict) else None
     corrs = (profile or {}).get("strong_correlations") if isinstance(profile, dict) else None
     anomalies = (analysis or {}).get("anomalies") if isinstance(analysis, dict) else None
 
     # Keep a small sample; stringify to avoid numpy/pandas types
-    sample = df.head(20).fillna("").to_dict(orient="records")
+    sample = df.head(int(settings.llm_max_sample_rows)).fillna("").to_dict(orient="records")
     try:
         sample_json = json.loads(json.dumps(sample, default=str))
     except Exception:
@@ -139,7 +171,7 @@ def build_dataset_context(df: pd.DataFrame, types: dict[str, str], analysis: dic
 
     return {
         "shape": shape,
-        "columns": cols[:60],
+        "columns": cols,
         "types": types,
         "column_summary": col_summary,
         "strong_correlations": corrs[:8] if isinstance(corrs, list) else [],

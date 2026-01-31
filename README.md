@@ -35,18 +35,61 @@ Frontend runs at `http://localhost:3000`.
 
 ### Product flow (what to click)
 
+- **Login (recommended)**: open `/login` for passwordless sign-in (enables private history + uploads)
 - **Upload**: open the homepage and drag/drop any `.csv` / `.xlsx`
 - **Dashboard**: you’ll be routed to `/d/:datasetId` with charts + insights + anomalies + chat
+- **Pivot Explorer**: in the Overview tab, run deterministic pivots (group-by + time bucketing) with citations
 - **Share**: click “Copy share link” (opens `/s/:shareId`)
 - **Export PDF**: click “Export PDF” (hits backend `report.pdf`)
 
 ### API endpoints (backend)
 
+- `POST /api/auth/request_code`: request a login code (dev returns `dev_code`)
+- `POST /api/auth/verify_code`: verify login code → JWT
 - `POST /api/datasets/upload`: upload a file, returns `dataset_id`, `share_id`, and `analysis`
 - `GET /api/datasets/{dataset_id}`: load stored analysis
 - `GET /api/share/{share_id}`: load analysis by share link
 - `POST /api/datasets/{dataset_id}/chat`: basic Q&A over the dataset
+- `POST /api/datasets/{dataset_id}/pivot`: deterministic slice/pivot (group-by, metric agg, time grain, top-N) with citations
+- `GET /api/datasets/{dataset_id}/chat/history`: resume chat history
+- `GET /api/datasets/{dataset_id}/anomalies/{anomaly_index}/explain`: explain a spike anomaly (period vs previous + contributors)
 - `GET /api/datasets/{dataset_id}/report.pdf`: generate a PDF report
+
+### Tests (backend)
+
+```bash
+cd backend
+source .venv/bin/activate
+pytest -q
+```
+
+Optional OpenAI schema eval (only runs if enabled):
+
+```bash
+cd backend
+source .venv/bin/activate
+export RUN_OPENAI_EVALS=1
+pytest -q tests/test_openai_schema_optional.py
+```
+
+### Migrations (backend, optional)
+
+This repo includes Alembic migrations under `backend/alembic/`.
+
+```bash
+cd backend
+source .venv/bin/activate
+alembic -c alembic.ini upgrade head
+```
+
+If you already ran the app previously (SQLite tables created via `create_all`), you may need to stamp the initial migration once:
+
+```bash
+cd backend
+source .venv/bin/activate
+PYTHONPATH=. alembic -c alembic.ini stamp 20260131_0001
+PYTHONPATH=. alembic -c alembic.ini upgrade head
+```
 
 ### Optional: Postgres + Redis (local)
 
@@ -61,13 +104,70 @@ Then set `DATABASE_URL` (backend) to Postgres and restart the API.
 Backend: `backend/env.example`  
 Frontend: `frontend/env.example`
 
+Auth (backend):
+
+- `JWT_SECRET`: keep stable; changing it invalidates existing tokens
+- `JWT_EXP_MINUTES`: token TTL
+
 ### Enable OpenAI for Chat (recommended)
 
 In `backend/.env`:
 
 - `OPENAI_API_KEY`: your key
 - `OPENAI_MODEL`: defaults to `gpt-4.1` (override if needed)
+- `OPENAI_PROMPT_VERSION`: prompt version string stored in chat citations (helps debugging/evals)
+- Budgets:
+  - `OPENAI_TIMEOUT_S` (default 25s)
+  - `OPENAI_MAX_TOKENS` (default 700)
+  - `LLM_MAX_SAMPLE_ROWS` (default 20)
+  - `LLM_MAX_COLUMNS` (default 45)
 
+### Privacy / PII (health-data friendly)
+
+On upload, the app runs a lightweight **PII risk scan** (column name + sample value heuristics) and surfaces warnings in the Overview tab.
+This is a **best-effort signal**, not a compliance feature.
+
+### Auth + private history
+
+History/upload endpoints now require auth. Use `/login` in the frontend (passwordless email code) to get a token.
+
+### Async processing (large files)
+
+Uploads above `UPLOAD_ASYNC_THRESHOLD_BYTES` return immediately with `status=processing`. The dataset page polls until it becomes `ready`.
+
+### Request IDs
+
+Every backend response includes an `x-request-id` header (useful for tracing logs and debugging).
+
+### Senior-analyst features (Overview tab)
+
+- **Executive brief**: primary metric + latest vs previous period change + top drivers (when possible)
+- **Data dictionary**: inferred schema, missing %, examples, “id-like”/quality notes
+- **Pivot Explorer**: deterministic pivots and time series with citations (no LLM)
+
+### LLM evaluation
+
+- Golden prompt suite (`tests/golden_prompts/*.json`?) tracks expected outputs + citations; run `pytest` to guard regressions.
+- Optional OpenAI schema eval shows the model still respects JSON output; switch `RUN_OPENAI_EVALS=1` for extra validation.
+- Each response records `prompt_version`, `model`, `usage`, and `retrieval` metadata so you can compare versions in logs (stored in `ai_events`).
+
+### Observability & monitoring
+
+- Every call logs `x-request-id`, dataset ID, latency, model/usage, and failure reason.
+- `ai_events` table stores latency, prompt version, usage, and errors; you can build a dashboard (p95/p99 latency, token cost, error rate) with this data.
+- Async jobs (pivot + dataset processing) have progress + status; the UI polls with `status=processing`.
+- Add a simple watcher/cron (or connect to your monitoring stack) to alert if `ai_events` latency spikes or job failure rate rises.
+
+### Feedback & human review
+
+- Chat responses expose `citations` so analysts see exactly what was computed.
+- You can add thumbs-up/down (future improvement) by saving user feedback in `ChatMessage`.
+- PII scan warns about sensitive columns; combine that with a human review workflow or manual override before sharing reports.
+
+### Experimentation / A/B testing (future)
+
+- Prompt changes increase `prompt_version` (default `v1` in `.env`); the stored metadata supports comparing metrics across versions.
+- You can gate rollout of new prompts, pivot modes, or prompt improvements via feature flags and observe the `ai_events` table for performance gains.
 ### Deploy (suggested)
 
 - **Frontend**: Vercel (set `NEXT_PUBLIC_API_BASE_URL`)

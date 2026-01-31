@@ -23,9 +23,21 @@ export default function DatasetPage({ params }: { params: { datasetId: string } 
       setLoading(true);
       setError(null);
       try {
-        const res = await getDataset(datasetId);
-        if (!cancelled) setData(res);
+        // Poll until ready (async processing)
+        for (let i = 0; i < 120; i++) {
+          const res = await getDataset(datasetId);
+          if (cancelled) return;
+          setData(res);
+          const st = String(res?.status ?? "");
+          if (!st || st === "ready") break;
+          await new Promise((r) => setTimeout(r, 1500));
+        }
       } catch (e: any) {
+        const msg = String(e?.message ?? "");
+        if (!cancelled && (msg.includes("(401)") || msg.toLowerCase().includes("missing bearer token"))) {
+          window.location.href = `/login?next=${encodeURIComponent(`/d/${datasetId}`)}`;
+          return;
+        }
         if (!cancelled) setError(e?.message ?? "Failed to load dataset.");
       } finally {
         if (!cancelled) setLoading(false);
@@ -43,7 +55,11 @@ export default function DatasetPage({ params }: { params: { datasetId: string } 
           <div className="flex items-center justify-between">
             <div>
               <div className="text-lg font-semibold text-fg">Building your dashboard…</div>
-              <div className="mt-1 text-sm text-fg-muted">Profiling columns, picking charts, finding anomalies.</div>
+              <div className="mt-1 text-sm text-fg-muted">
+                {data?.status === "processing"
+                  ? "Upload received. Processing in the background — this page will refresh automatically."
+                  : "Profiling columns, picking charts, finding anomalies."}
+              </div>
             </div>
             <Badge>working</Badge>
           </div>

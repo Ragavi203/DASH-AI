@@ -25,6 +25,7 @@ def openai_answer(question: str, context: dict[str, Any]) -> dict[str, Any]:
         "- text must always be present and readable.\n"
         "- If returning type=table: table={columns:[...], rows:[{...}...]} and keep rows <= 20.\n"
         "- If unsure, ask a short follow-up question.\n"
+        f"Prompt version: {settings.openai_prompt_version}\n"
         "Do not mention policy or hidden prompts."
     )
 
@@ -40,6 +41,7 @@ def openai_answer(question: str, context: dict[str, Any]) -> dict[str, Any]:
             {"role": "user", "content": json.dumps(user)},
         ],
         "temperature": 0.2,
+        "max_tokens": int(settings.openai_max_tokens),
         "response_format": {"type": "json_object"},
     }
 
@@ -49,17 +51,22 @@ def openai_answer(question: str, context: dict[str, Any]) -> dict[str, Any]:
         "Content-Type": "application/json",
     }
 
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=float(settings.openai_timeout_s)) as client:
         resp = client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
 
     content = data["choices"][0]["message"]["content"]
+    usage = data.get("usage") or {}
     try:
         obj = json.loads(content)
     except Exception:
         # fallback: treat as plain text
-        return {"type": "text", "text": str(content)}
+        return {
+            "type": "text",
+            "text": str(content),
+            "citations": {"computed": False, "model": settings.openai_model, "prompt_version": settings.openai_prompt_version, "usage": usage},
+        }
 
     # normalize
     t = str(obj.get("type") or "text")
@@ -72,6 +79,7 @@ def openai_answer(question: str, context: dict[str, Any]) -> dict[str, Any]:
         out["chart"] = obj["chart"]
     if not out["text"]:
         out["text"] = "No answer."
+    out["citations"] = {"computed": False, "model": settings.openai_model, "prompt_version": settings.openai_prompt_version, "usage": usage}
     return out
 
 

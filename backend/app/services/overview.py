@@ -4,6 +4,8 @@ from typing import Any
 
 import pandas as pd
 
+from app.services.pii_scan import pii_scan
+
 
 def build_overview(df: pd.DataFrame, analysis: dict[str, Any]) -> dict[str, Any]:
     """
@@ -11,6 +13,7 @@ def build_overview(df: pd.DataFrame, analysis: dict[str, Any]) -> dict[str, Any]
     - KPI cards (date range, primary metric total/avg, missing rate, duplicates)
     - Suggested questions tailored to columns
     - Quick highlights derived from analysis
+    - Senior-analyst extras: executive brief (change + drivers) + data dictionary
     """
     profile = (analysis.get("profile") or {}) if isinstance(analysis, dict) else {}
     types = (analysis.get("types") or {}) if isinstance(analysis, dict) else {}
@@ -103,5 +106,217 @@ def build_overview(df: pd.DataFrame, analysis: dict[str, Any]) -> dict[str, Any]
         "highlights": highlights[:6],
         "suggested_questions": qs[:8],
         "columns": [str(c) for c in columns[:60]],
+        "privacy": pii_scan(df),
+        "executive_brief": _build_executive_brief(df, profile, types),
+        "data_dictionary": _build_data_dictionary(df, profile, types),
     }
+
+
+def _build_executive_brief(df: pd.DataFrame, profile: dict[str, Any], types: dict[str, str]) -> dict[str, Any] | None:
+    """
+    Analyst-style summary:
+    - pick a primary numeric metric + date column
+    - compute last vs previous period delta (month/week/day)
+    - attribute delta to a best categorical dimension if possible
+    """
+    dt_cols = [c for c, t in types.items() if t == "datetime"]
+    num_cols = [c for c, t in types.items() if t == "numeric"]
+    cat_cols = [c for c, t in types.items() if t == "categorical"]
+    if not dt_cols or not num_cols:
+        return None
+
+    dt_col = str(dt_cols[0])
+    metric = _pick_primary_metric(num_cols)
+    if not metric:
+        return None
+
+    d = df[[dt_col, metric] + ([cat_cols[0]] if cat_cols else [])].copy()
+    d[dt_col] = pd.to_datetime(d[dt_col], errors="coerce", infer_datetime_format=True)
+    d[metric] = pd.to_numeric(d[metric], errors="coerce")
+    d = d.dropna(subset=[dt_col, metric])
+    if d.empty:
+        return None
+
+    # choose a stable grain based on date span
+    col_info = ((profile.get("columns") or {}).get(dt_col) or {}) if isinstance(profile.get("columns"), dict) else {}
+    min_dt = col_info.get("min")
+    max_dt = col_info.get("max")
+    grain = "month"
+    try:
+        if min_dt and max_dt:
+            span_days = (pd.Timestamp(max_dt) - pd.Timestamp(min_dt)).days
+            if span_days <= 14:
+                grain = "day"
+            elif span_days <= 120:
+                grain = "week"
+    except Exception:
+        grain = "month"
+
+    if grain == "day":
+        bucket = d[dt_col].dt.floor("D")
+    elif grain == "week":
+        bucket = d[dt_col].dt.to_period("W").dt.start_time
+    else:
+        bucket = d[dt_col].dt.to_period("M").dt.to_timestamp()
+
+    g = d.assign(_bucket=bucket).groupby("_bucket")[metric].sum().sort_index()
+    if g.shape[0] < 2:
+        return None
+
+    # last + previous
+    buckets = list(g.index)
+    cur_b = buckets[-1]
+    prev_b = buckets[-2]
+    cur_v = float(g.loc[cur_b])
+    prev_v = float(g.loc[prev_b])
+    delta = cur_v - prev_v
+    pct = (delta / abs(prev_v)) if prev_v not in (0.0, -0.0) else None
+
+    # trend chart (last 12 buckets)
+    tail = g.tail(12)
+    trend_chart = {
+        "type": "line",
+        "title": f"{metric} trend ({grain})",
+        "x": "x",
+        "y": "y",
+        "time_grain": grain,
+        "data": [{"x": pd.Timestamp(k).date().isoformat(), "y": float(v)} for k, v in tail.items()],
+        "section": "Recommended",
+        "reason": "Auto-generated executive trend for the primary metric.",
+    }
+
+    bullets: list[str] = []
+    bullets.append(f"Primary metric: {metric}.")
+    bullets.append(
+        f"Latest {grain}: {cur_v:,.4g} vs previous {prev_v:,.4g} (Δ {delta:,.4g}"
+        + (f", {pct*100:.1f}%." if isinstance(pct, float) else ").")
+    )
+
+    drivers = None
+    driver_dim = _pick_driver_dimension(profile, cat_cols)
+    if driver_dim:
+        dd = df[[dt_col, metric, driver_dim]].copy()
+        dd[dt_col] = pd.to_datetime(dd[dt_col], errors="coerce", infer_datetime_format=True)
+        dd[metric] = pd.to_numeric(dd[metric], errors="coerce")
+        dd = dd.dropna(subset=[dt_col, metric, driver_dim])
+        if not dd.empty:
+            if grain == "day":
+                b2 = dd[dt_col].dt.floor("D")
+            elif grain == "week":
+                b2 = dd[dt_col].dt.to_period("W").dt.start_time
+            else:
+                b2 = dd[dt_col].dt.to_period("M").dt.to_timestamp()
+            dd = dd.assign(_bucket=b2)
+            cur = dd[dd["_bucket"] == cur_b].groupby(driver_dim)[metric].sum()
+            prev = dd[dd["_bucket"] == prev_b].groupby(driver_dim)[metric].sum()
+            keys = set(map(str, cur.index.tolist())) | set(map(str, prev.index.tolist()))
+            rows = []
+            for k in keys:
+                cv = float(cur.get(k, 0.0))
+                pv = float(prev.get(k, 0.0))
+                rows.append({"segment": str(k), "current": cv, "previous": pv, "delta": cv - pv})
+            rows.sort(key=lambda r: abs(float(r["delta"])), reverse=True)
+            top = rows[:8]
+            drivers = {"dimension": driver_dim, "rows": top}
+            if top:
+                bullets.append(f"Top drivers by {driver_dim}: {', '.join([str(r['segment']) for r in top[:3]])}.")
+
+    return {
+        "metric": metric,
+        "date_col": dt_col,
+        "grain": grain,
+        "current_bucket": str(cur_b),
+        "previous_bucket": str(prev_b),
+        "current_value": cur_v,
+        "previous_value": prev_v,
+        "delta": delta,
+        "pct_change": pct,
+        "bullets": bullets[:6],
+        "trend_chart": trend_chart,
+        "drivers": drivers,
+    }
+
+
+def _pick_primary_metric(num_cols: list[str]) -> str | None:
+    if not num_cols:
+        return None
+    prefs = ["revenue", "sales", "amount", "total", "price", "profit", "cost", "spend", "qty", "quantity", "score"]
+    for p in prefs:
+        for c in num_cols:
+            if p in str(c).lower():
+                return c
+    return num_cols[0]
+
+
+def _pick_driver_dimension(profile: dict[str, Any], cat_cols: list[str]) -> str | None:
+    cols_prof = profile.get("columns") or {}
+    if not isinstance(cols_prof, dict):
+        return cat_cols[0] if cat_cols else None
+    # choose low-ish cardinality categorical (avoid IDs)
+    best = None
+    best_score = -1.0
+    for c in cat_cols[:15]:
+        info = cols_prof.get(c) or {}
+        if not isinstance(info, dict):
+            continue
+        ur = info.get("unique_ratio")
+        uniq = info.get("unique")
+        if isinstance(ur, (int, float)) and ur > 0.8:
+            continue
+        if isinstance(uniq, int) and uniq > 200:
+            continue
+        score = 0.0
+        if isinstance(ur, (int, float)):
+            score += float(max(0.0, 0.35 - ur)) * 10.0
+        if isinstance(info.get("top_values"), list):
+            score += 2.0
+        name = str(c).lower()
+        if any(k in name for k in ["id", "uuid", "guid", "email", "phone"]):
+            score -= 10.0
+        if score > best_score:
+            best_score = score
+            best = c
+    return best or (cat_cols[0] if cat_cols else None)
+
+
+def _build_data_dictionary(df: pd.DataFrame, profile: dict[str, Any], types: dict[str, str]) -> dict[str, Any]:
+    cols_prof = (profile.get("columns") or {}) if isinstance(profile, dict) else {}
+    missing_by = (profile.get("missing_by_col") or {}) if isinstance(profile, dict) else {}
+    n_rows = int((profile.get("shape") or {}).get("rows") or df.shape[0])
+    entries: list[dict[str, Any]] = []
+    for c in list(df.columns)[:60]:
+        info = (cols_prof.get(c) or {}) if isinstance(cols_prof, dict) else {}
+        t = str(types.get(c) or info.get("type") or "unknown")
+        miss = int(missing_by.get(c, 0) or 0)
+        miss_pct = (miss / n_rows) if n_rows else 0.0
+        uniq = info.get("unique")
+        ur = info.get("unique_ratio")
+        top_vals = info.get("top_values") if isinstance(info, dict) else None
+        examples = []
+        if isinstance(top_vals, list):
+            for tv in top_vals[:4]:
+                if isinstance(tv, dict) and tv.get("value") is not None:
+                    examples.append(str(tv["value"])[:40])
+        notes = []
+        name = str(c).lower()
+        if miss_pct >= 0.3:
+            notes.append("high missing")
+        if t in {"categorical", "text"} and isinstance(ur, (int, float)) and float(ur) >= 0.9:
+            notes.append("id-like (very high uniqueness)")
+        if any(k in name for k in ["id", "uuid", "guid"]):
+            notes.append("identifier column")
+        if t == "numeric" and isinstance(info, dict) and info.get("std") == 0:
+            notes.append("constant")
+        entries.append(
+            {
+                "column": str(c),
+                "type": t,
+                "missing_pct": round(miss_pct * 100.0, 2),
+                "unique": int(uniq) if isinstance(uniq, int) else None,
+                "unique_ratio": round(float(ur), 4) if isinstance(ur, (int, float)) else None,
+                "examples": examples,
+                "notes": notes[:3],
+            }
+        )
+    return {"columns": entries}
 
