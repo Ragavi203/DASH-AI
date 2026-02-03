@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import pandas as pd
+import pandas as pd  # type: ignore[import]
 
 from app.services.pii_scan import pii_scan
 
@@ -109,6 +109,9 @@ def build_overview(df: pd.DataFrame, analysis: dict[str, Any]) -> dict[str, Any]
         "privacy": pii_scan(df),
         "executive_brief": _build_executive_brief(df, profile, types),
         "data_dictionary": _build_data_dictionary(df, profile, types),
+        "health": _build_health_component(n_rows, missing_rate, dup, quality),
+        "insight_cards": _build_insight_cards(analysis),
+        "insight_automation": _build_insight_automation(df, profile, types, analysis.get("anomalies") or [], analysis.get("insights") or []),
     }
 
 
@@ -319,4 +322,106 @@ def _build_data_dictionary(df: pd.DataFrame, profile: dict[str, Any], types: dic
             }
         )
     return {"columns": entries}
+
+
+def _build_health_component(n_rows: int, missing_rate: float, dup: int, quality: dict[str, Any]) -> dict[str, Any]:
+    """Score and summarize dataset health for analysts."""
+    score = _compute_health_score(missing_rate, dup, n_rows)
+    notes = []
+    if missing_rate > 0:
+        notes.append(f"Missing {missing_rate * 100:.1f}% of cells")
+    if dup:
+        notes.append(f"{dup:,} duplicate rows")
+    high_missing = quality.get("high_missing_columns") or []
+    if isinstance(high_missing, list) and high_missing:
+        notes.append(f"High-missing columns: {', '.join(str(c) for c in high_missing[:3])}")
+    constant_cols = quality.get("constant_columns") or []
+    if isinstance(constant_cols, list) and constant_cols:
+        notes.append(f"Constant columns: {', '.join(str(c) for c in constant_cols[:3])}")
+    return {
+        "score": round(score, 1),
+        "missing_pct": round(missing_rate * 100.0, 2),
+        "duplicate_rows": dup,
+        "notes": notes[:4],
+        "health_tone": _health_tone(score),
+    }
+
+
+def _compute_health_score(missing_rate: float, dup: int, n_rows: int) -> float:
+    """Blend missing rate and duplicates into a 0-100 score."""
+    base = 100.0
+    base -= min(45.0, missing_rate * 100.0 * 0.9)
+    if n_rows:
+        dup_pct = (dup / max(1, n_rows)) * 100.0
+        base -= min(30.0, dup_pct)
+    return max(5.0, min(100.0, base))
+
+
+def _health_tone(score: float) -> str:
+    if score >= 80:
+        return "good"
+    if score >= 50:
+        return "warn"
+    return "bad"
+
+
+def _build_insight_cards(analysis: dict[str, Any]) -> list[dict[str, Any]]:
+    insights = []
+    for ins in (analysis.get("insights") or [])[:5]:
+        text = str(ins.get("text") or "").strip()
+        if not text:
+            continue
+        insights.append({"type": str(ins.get("type") or "insight"), "text": text})
+    return insights
+
+
+def _build_insight_automation(
+    df: pd.DataFrame,
+    profile: dict[str, Any],
+    types: dict[str, str],
+    anomalies: list[dict[str, Any]],
+    insights: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    shape = (profile.get("shape") or {}) if isinstance(profile, dict) else {}
+    rows = int(shape.get("rows") or df.shape[0])
+    cols = int(shape.get("cols") or df.shape[1])
+    summary_parts: list[str] = [f"Dataset of {rows:,} rows across {cols} columns."]
+    primary = _pick_primary_metric([c for c, t in types.items() if t == "numeric"])
+    cat_cols = [c for c, t in types.items() if t == "categorical"]
+    if primary:
+        if cat_cols:
+            focus = f"Focus on {primary} by {cat_cols[0]}"
+            if len(cat_cols) > 1:
+                focus += f" and {cat_cols[1]}"
+            focus += "."
+        else:
+            focus = f"Primary metric: {primary}."
+        summary_parts.append(focus)
+    factors: list[str] = []
+    corr = (profile.get("strong_correlations") or []) if isinstance(profile, dict) else []
+    if corr:
+        top_corr = corr[0]
+        factors.append(
+            f"{top_corr['a']} ↔ {top_corr['b']} correlate ({float(top_corr['corr']):.2f})"
+        )
+    missing_by = (profile.get("missing_by_col") or {}) if isinstance(profile, dict) else {}
+    top_missing = sorted([(c, int(m or 0)) for c, m in (missing_by.items() if isinstance(missing_by, dict) else [])], key=lambda kv: kv[1], reverse=True)
+    if top_missing and top_missing[0][1] > 0:
+        factors.append(f"High missing: {top_missing[0][0]} ({top_missing[0][1]:,} rows)")
+    top_anomaly = anomalies[:2]
+    for anomaly in top_anomaly:
+        if anomaly.get("type") == "spike":
+            factors.append(f"Spike in {anomaly.get('y_col')} around {anomaly.get('x')}")
+        else:
+            col = anomaly.get("col") or anomaly.get("y_col")
+            if col:
+                factors.append(f"Outlier in {col}")
+    if not factors and insights:
+        for insight in insights[:2]:
+            text = str(insight.get("text") or "")
+            if text:
+                factors.append(text)
+    if not summary_parts and not factors:
+        return None
+    return {"summary": " ".join(summary_parts), "factors": factors[:4]}
 

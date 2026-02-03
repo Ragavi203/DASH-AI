@@ -28,6 +28,11 @@ class DatasetListItem(BaseModel):
     status: str | None = None
     rows: int | None = None
     cols: int | None = None
+    primary_metric: str | None = None
+    health_score: float | None = None
+    missing_pct: float | None = None
+    duplicate_rows: int | None = None
+    insight_count: int | None = None
 
 
 class DatasetListResponse(BaseModel):

@@ -14,6 +14,11 @@ export type DatasetListItem = {
   status?: string | null;
   rows?: number | null;
   cols?: number | null;
+  primary_metric?: string | null;
+  health_score?: number | null;
+  missing_pct?: number | null;
+  duplicate_rows?: number | null;
+  insight_count?: number | null;
 };
 
 export type DatasetListResponse = { items: DatasetListItem[] };

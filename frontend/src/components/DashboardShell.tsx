@@ -6,6 +6,8 @@ import { ChartCard } from "./ChartCard";
 import { formatNumber } from "@/lib/format";
 import { chat, explainAnomaly, getChatHistory, pivot, reportPdfUrl } from "@/lib/api";
 
+type InsightCardView = { text: string; type?: string };
+
 function Stat({ label, value }: { label: string; value: any }) {
   return (
     <Card className="p-4">
@@ -39,6 +41,12 @@ export function DashboardShell({
   const overview = analysis?.overview ?? null;
   const execBrief = overview?.executive_brief ?? null;
   const dataDict = overview?.data_dictionary ?? null;
+  const health = overview?.health ?? null;
+  const insightCards: InsightCardView[] = Array.isArray(overview?.insight_cards)
+    ? (overview.insight_cards as InsightCardView[]).slice(0, 3)
+    : [];
+  const suggestedTemplates = Array.isArray(overview?.suggested_questions) ? overview.suggested_questions : [];
+  const insightAutomation = overview?.insight_automation ?? null;
 
   const chartSections = useMemo(() => {
     const bySection: Record<string, any[]> = {};
@@ -141,7 +149,7 @@ export function DashboardShell({
       </div>
 
       {tab === "overview" ? (
-        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-1">
             {(overview?.kpis ? overview.kpis : []).slice(0, 6).map((k: any, idx: number) => (
               <Stat key={idx} label={String(k.label)} value={typeof k.value === "number" ? formatNumber(k.value) : String(k.value)} />
@@ -183,6 +191,67 @@ export function DashboardShell({
               )}
             </div>
           </Card>
+
+          {insightAutomation?.summary ? (
+            <Card className="lg:col-span-3 p-5">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-fg">Automated insight summary</div>
+                <Badge tone="neutral">auto</Badge>
+              </div>
+              <div className="mt-3 text-sm text-fg/90">{insightAutomation.summary}</div>
+              {Array.isArray(insightAutomation.factors) && insightAutomation.factors.length ? (
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-fg/90">
+                  {insightAutomation.factors.map((factor: string, idx: number) => (
+                    <span key={`${factor}:${idx}`} className="rounded-full border border-card-border px-3 py-1">
+                      {factor}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </Card>
+          ) : null}
+
+          {health ? (
+            <Card className="lg:col-span-3 p-5">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-fg">Dataset health</div>
+                <Badge tone={health.health_tone ?? "neutral"}>{`${Math.round(health.score)}%`}</Badge>
+              </div>
+              <div className="mt-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                <div className="text-4xl font-semibold text-fg">{`${Math.round(health.score)}%`}</div>
+                <div className="text-sm text-fg-muted">
+                  {health.missing_pct != null ? `${health.missing_pct.toFixed(1)}% missing` : "Missing % pending"} •{" "}
+                  {health.duplicate_rows != null ? `${formatNumber(health.duplicate_rows)} duplicates` : "Duplicates not flagged"}
+                </div>
+              </div>
+              {Array.isArray(health.notes) && health.notes.length ? (
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-fg/90">
+                  {health.notes.map((note: string, idx: number) => (
+                    <span key={idx} className="rounded-full border border-card-border px-3 py-1">
+                      {note}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </Card>
+          ) : null}
+
+          {insightCards.length ? (
+            <Card className="lg:col-span-3 p-5">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-fg">Analyst insight cards</div>
+                <div className="text-xs text-fg-muted">grounded reasoning</div>
+              </div>
+              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                {insightCards.map((card, idx) => (
+                  <div key={`${card.text}:${idx}`} className="rounded-2xl border border-card-border bg-bg-soft/40 p-4">
+                    <div className="text-[11px] font-semibold text-fg-muted tracking-wide">{String(card.type || "insight").toUpperCase()}</div>
+                    <div className="mt-2 text-sm text-fg/90">{String(card.text)}</div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          ) : null}
 
           {execBrief?.bullets?.length ? (
             <Card className="lg:col-span-3 p-5">
@@ -661,7 +730,7 @@ export function DashboardShell({
       ) : null}
 
       {tab === "chat" ? (
-        <ChatPanel datasetId={datasetId} />
+        <ChatPanel datasetId={datasetId} templates={suggestedTemplates} />
       ) : null}
     </div>
   );
@@ -711,7 +780,7 @@ function DataTable({ rows }: { rows: any[] }) {
   );
 }
 
-function ChatPanel({ datasetId }: { datasetId: string }) {
+function ChatPanel({ datasetId, templates }: { datasetId: string; templates?: string[] }) {
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<
@@ -749,10 +818,10 @@ function ChatPanel({ datasetId }: { datasetId: string }) {
     };
   }, [datasetId]);
 
-  async function send() {
-    const question = q.trim();
+  async function send(inputQuestion?: string) {
+    const question = String((inputQuestion ?? q).trim());
     if (!question || busy) return;
-    setQ("");
+    if (!inputQuestion) setQ("");
     setMessages((m) => [...m, { role: "user", text: question }]);
     setBusy(true);
     try {
@@ -784,6 +853,22 @@ function ChatPanel({ datasetId }: { datasetId: string }) {
         <Badge>beta</Badge>
       </div>
 
+      <div className="mt-3 text-xs text-fg-muted">
+        Ask anything—even open-ended what/why questions. The system falls back to deterministic answers when needed.
+      </div>
+      {templates && templates.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {templates.slice(0, 5).map((template) => (
+            <button
+              key={template}
+              onClick={() => void send(template)}
+              className="rounded-full border border-card-border bg-bg-soft/60 px-3 py-2 text-xs text-fg/90 hover:bg-bg/60"
+            >
+              {template}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="mt-4 h-[420px] overflow-auto rounded-2xl border border-card-border bg-bg-soft/40 p-4">
         <div className="space-y-3">
           {messages.map((m, idx) => (
@@ -831,7 +916,7 @@ function ChatPanel({ datasetId }: { datasetId: string }) {
           placeholder="Ask a question…"
           className="h-11 flex-1 rounded-xl border border-card-border bg-card/50 px-4 text-sm text-fg placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent/40"
         />
-        <Button onClick={send} disabled={busy}>
+        <Button onClick={() => void send()} disabled={busy}>
           {busy ? "Thinking…" : "Send"}
         </Button>
       </div>

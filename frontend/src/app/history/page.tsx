@@ -10,6 +10,13 @@ function formatTime(iso: string): string {
   return d.toLocaleString();
 }
 
+function healthTone(score?: number | null): "good" | "warn" | "bad" | undefined {
+  if (score == null) return undefined;
+  if (score >= 80) return "good";
+  if (score >= 50) return "warn";
+  return "bad";
+}
+
 export default function HistoryPage() {
   const [items, setItems] = useState<DatasetListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -106,14 +113,25 @@ export default function HistoryPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="text-sm font-semibold text-fg truncate">{it.original_filename}</div>
+                      <Badge tone={healthTone(it.health_score)}>
+                        {it.health_score != null ? `Health ${it.health_score.toFixed(0)}%` : "Health pending"}
+                      </Badge>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
                       <Badge>{it.rows != null ? `${it.rows.toLocaleString()} rows` : "—"}</Badge>
                       <Badge>{it.cols != null ? `${it.cols} cols` : "—"}</Badge>
+                      <Badge>{it.missing_pct != null ? `Missing ${it.missing_pct.toFixed(1)}%` : "Missing %"} </Badge>
+                      {it.duplicate_rows != null ? <Badge>{it.duplicate_rows.toLocaleString()} duplicate rows</Badge> : null}
+                      {it.insight_count != null ? <Badge>{it.insight_count} insights</Badge> : null}
                       <Badge>chat saved</Badge>
                     </div>
                     <div className="mt-1 text-xs text-fg-muted">
                       {formatTime(it.created_at)} • Dataset{" "}
                       <span className="font-mono text-fg/70">{it.dataset_id.slice(0, 8)}…</span>
                     </div>
+                    {it.primary_metric ? (
+                      <div className="mt-1 text-xs text-fg-muted">Primary metric: {it.primary_metric}</div>
+                    ) : null}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">

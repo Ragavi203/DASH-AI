@@ -191,9 +191,17 @@ def list_datasets(db: Session = Depends(get_db), user: User = Depends(get_curren
             shape = (analysis.get("profile") or {}).get("shape") or {}
             n_rows = shape.get("rows")
             n_cols = shape.get("cols")
+            overview = (analysis.get("overview") or {}) if isinstance(analysis, dict) else {}
+            health = (overview.get("health") or {}) if isinstance(overview, dict) else {}
+            executive = (overview.get("executive_brief") or {}) if isinstance(overview, dict) else {}
+            insights = analysis.get("insights") or []
         except Exception:
             n_rows = None
             n_cols = None
+            overview = {}
+            health = {}
+            executive = {}
+            insights = []
         items.append(
             DatasetListItem(
                 dataset_id=r.id,
@@ -203,6 +211,11 @@ def list_datasets(db: Session = Depends(get_db), user: User = Depends(get_curren
                 status=str(r.status) if r.status else None,
                 rows=n_rows if isinstance(n_rows, int) else None,
                 cols=n_cols if isinstance(n_cols, int) else None,
+                primary_metric=str(executive.get("metric")) if executive.get("metric") else None,
+                health_score=float(health.get("score")) if isinstance(health.get("score"), (int, float)) else None,
+                missing_pct=float(health.get("missing_pct")) if isinstance(health.get("missing_pct"), (int, float)) else None,
+                duplicate_rows=int(health.get("duplicate_rows")) if isinstance(health.get("duplicate_rows"), (int, float)) else None,
+                insight_count=len(insights) if isinstance(insights, list) else None,
             )
         )
     return DatasetListResponse(items=items)
